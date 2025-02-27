@@ -4,6 +4,7 @@ const memoireController = require('../controllers/memoireController');
 const { upload } = require('../config/upload');
 const { sendEmail } = require('../config/email');
 const db = require('../config/db');
+const { signDocument } = require('../utils/crypto');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -281,9 +282,16 @@ router.delete('/:id', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const [memoire] = await db.promise().query(
-      `SELECT m.*, e.name as etudiant_nom 
+      `SELECT m.*, 
+              e.name as etudiant_nom, 
+              e.email,
+              a.name as admin_name,
+              ds.signed_at as validation_date,
+              ds.signature
        FROM memoire m 
        LEFT JOIN etudiant e ON m.id_etudiant = e.id_etudiant 
+       LEFT JOIN digital_signatures ds ON m.id_memoire = ds.id_memoire
+       LEFT JOIN admin a ON ds.id_admin = a.id_admin
        WHERE m.id_memoire = ?`,
       [req.params.id]
     );
@@ -295,15 +303,21 @@ router.get('/:id', async (req, res) => {
       });
     }
 
+    const memoireWithValidation = {
+      ...memoire[0],
+      validated_by_name: memoire[0].admin_name || null,
+      validation_date: memoire[0].validation_date || null
+    };
+
     res.json({
       success: true,
-      memoire: memoire[0]
+      memoire: memoireWithValidation
     });
   } catch (error) {
     console.error('Error fetching memoire:', error);
     res.status(500).json({
       success: false,
-      message: 'Error fetching memoire'
+      message: 'Error fetching memoire details'
     });
   }
 });
@@ -403,29 +417,52 @@ router.put('/:id/valider', async (req, res) => {
       });
     }
 
-    // Update the status
+    // Get admin info for signing
+    const [adminInfo] = await db.promise().query(
+      'SELECT private_key, public_key FROM admin WHERE id_admin = ?',
+      [req.body.adminId] // Make sure to send adminId from frontend
+    );
+
+    // Sign the document
+    const dataToSign = JSON.stringify({
+      memoireId: memoireInfo[0].id_memoire,
+      libelle: memoireInfo[0].libelle,
+      date: new Date().toISOString()
+    });
+
+    const signature = signDocument(dataToSign, adminInfo[0].private_key);
+
+    // Save signature in database
+    await db.promise().query(
+      `INSERT INTO digital_signatures (id_memoire, id_admin, signature, public_key) 
+       VALUES (?, ?, ?, ?)`,
+      [req.params.id, req.body.adminId, signature, adminInfo[0].public_key]
+    );
+
+    // Update memoire status and validated_by
     const [result] = await db.promise().query(
-      'UPDATE memoire SET status = "validated" WHERE id_memoire = ?',
-      [req.params.id]
+      'UPDATE memoire SET status = "validated", validated_by = ? WHERE id_memoire = ?',
+      [req.body.adminId, req.params.id]
     );
 
     // Format the current date
     const currentDate = new Date().toLocaleDateString('fr-FR');
 
-    // Send email notification with proper template
+    // Send email notification
     try {
       await sendEmail(
         memoireInfo[0].email,
         'Validation de votre mémoire',
-        `Votre mémoire "${memoireInfo[0].libelle}" a été validé le ${currentDate}.`, // Plain text version
+        `Votre mémoire "${memoireInfo[0].libelle}" a été validé et signé numériquement le ${currentDate}.`,
         `
           <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
             <h2 style="color: #2563eb;">Validation de Mémoire</h2>
             <p>Bonjour ${memoireInfo[0].name} ${memoireInfo[0].surname},</p>
-            <p>Nous avons le plaisir de vous informer que votre mémoire a été validé.</p>
+            <p>Nous avons le plaisir de vous informer que votre mémoire a été validé et signé numériquement.</p>
             <div style="margin: 20px 0; padding: 15px; background-color: #f3f4f6; border-radius: 5px;">
               <p><strong>Titre du mémoire :</strong> ${memoireInfo[0].libelle}</p>
               <p><strong>Date de validation :</strong> ${currentDate}</p>
+              <p><strong>Statut :</strong> Validé et signé numériquement</p>
             </div>
             <p>Félicitations pour votre travail !</p>
             <br>
@@ -440,7 +477,8 @@ router.put('/:id/valider', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Mémoire validé avec succès'
+      message: 'Mémoire validé et signé avec succès',
+      signature: signature
     });
   } catch (error) {
     console.error('Error validating memoire:', error);
