@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const memoireController = require('../controllers/memoireController');
 const { upload } = require('../config/upload');
 const { sendEmail } = require('../config/email');
 const db = require('../config/db');
@@ -8,6 +7,7 @@ const { signDocument } = require('../utils/crypto');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+
 
 // Créer le dossier uploads s'il n'existe pas
 const uploadDir = 'uploads/memoires';

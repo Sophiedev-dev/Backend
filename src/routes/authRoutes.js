@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const { sendVerificationEmail } = require('../config/email');
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 
@@ -86,8 +87,6 @@ router.post('/admin/generate-keys', authController.generateAdminKeys);
 
 // Route de inscription
 router.post('/signup', async (req, res) => {
-  console.log("Données reçues:", req.body); // Pour déboguer
-
   try {
     const { name, surname, email, password } = req.body;
 
@@ -104,8 +103,8 @@ router.post('/signup', async (req, res) => {
       });
     }
 
-    // Génération du code d'activation
-    const activationCode = generateActivationCode();
+    // Génération du code d'activation (6 chiffres)
+    const activationCode = Math.floor(100000 + Math.random() * 900000).toString();
 
     // Hashage du mot de passe
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -117,17 +116,7 @@ router.post('/signup', async (req, res) => {
     );
 
     // Envoi de l'email de vérification
-    const emailResult = await sendEmail(
-      email,
-      'Vérification de votre compte',
-      activationCode
-    );
-
-    if (!emailResult.success) {
-      // Si l'email n'a pas été envoyé, on supprime l'utilisateur
-      await db.promise().query('DELETE FROM etudiant WHERE id_etudiant = ?', [result.insertId]);
-      throw new Error('Erreur lors de l\'envoi de l\'email de vérification');
-    }
+    await sendVerificationEmail(email, activationCode);
 
     res.status(201).json({
       success: true,
