@@ -3,6 +3,7 @@ const router = express.Router();
 const { upload } = require('../config/upload');
 const { sendEmail } = require('../config/email');
 const db = require('../config/db');
+const similarityChecker = require('../utils/similarityChecker');
 const { signDocument } = require('../utils/crypto');
 const multer = require('multer');
 const path = require('path');
@@ -141,7 +142,49 @@ router.get('/memoires-with-students', async (req, res) => {
   }
 });
 
-// Route pour soumettre un nouveau mémoire
+// New route for similarity checking
+router.post('/check-similarity', uploadMiddleware.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Aucun fichier n\'a été uploadé'
+      });
+    }
+
+    // Extract text from uploaded PDF
+    const text = await similarityChecker.extractTextFromPDF(req.file.path);
+    
+    // Compare with existing mémoires
+    const results = await similarityChecker.compareWithExistingMemoires(text);
+    
+    // Get status based on similarity
+    const status = similarityChecker.getSimilarityStatus(results);
+    
+    // Delete the temporary file
+    fs.unlinkSync(req.file.path);
+
+    res.json({
+      success: true,
+      results: results,  // Array of similar documents
+      status: status    // Status object with level, message, etc.
+    });
+  } catch (error) {
+    console.error('Error checking similarity:', error);
+    
+    // Clean up the file if it exists
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Erreur lors de la vérification de similarité'
+    });
+  }
+});
+
+// Modified route for submitting a new mémoire with similarity check
 router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
   try {
     // Set content-type header
@@ -166,6 +209,11 @@ router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
       id_etudiant
     } = req.body;
 
+    // Check for similarity
+    const text = await similarityChecker.extractTextFromPDF(req.file.path);
+    const similarResults = await similarityChecker.compareWithExistingMemoires(text);
+    const status = similarityChecker.getSimilarityStatus(similarResults);
+
     // Insérer dans la base de données
     const [result] = await db.promise().query(
       `INSERT INTO memoire (
@@ -186,17 +234,104 @@ router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
       ]
     );
 
+    // Save similarity results
+    await similarityChecker.saveComparisonResults(result.insertId, similarResults);
+
     res.status(201).json({
       success: true,
       message: 'Mémoire soumis avec succès',
-      memoireId: result.insertId
+      memoireId: result.insertId,
+      similarityResults: {
+        results: similarResults,
+        status
+      }
     });
 
   } catch (error) {
     console.error('Erreur lors de la soumission:', error);
+    
+    // Clean up the file if it exists
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    
     res.status(500).json({
       success: false,
       message: error.message || 'Erreur lors de la sauvegarde du mémoire'
+    });
+  }
+});
+
+// Route to get similarity results for a mémoire
+router.get('/:id/similarity', async (req, res) => {
+  try {
+    const memoireId = req.params.id;
+    const results = await similarityChecker.getComparisonResults(memoireId);
+    
+    if (!results) {
+      return res.status(404).json({
+        success: false,
+        message: 'No similarity results found for this mémoire'
+      });
+    }
+    
+    const status = similarityChecker.getSimilarityStatus(results);
+    
+    res.json({
+      success: true,
+      results,
+      status
+    });
+  } catch (error) {
+    console.error('Error getting similarity results:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error getting similarity results'
+    });
+  }
+});
+
+// Route to get detailed similarity results for a mémoire so for a report 
+router.get('/memoire/:id/similarity/:targetId/details', async (req, res) => {
+  try {
+    const { id, targetId } = req.params;
+    
+    // Récupérer les deux mémoires
+    const [memoires] = await db.promise().query(
+      'SELECT id_memoire, libelle, file_path FROM memoire WHERE id_memoire IN (?, ?)',
+      [id, targetId]
+    );
+    
+    if (memoires.length !== 2) {
+      return res.status(404).json({
+        success: false,
+        message: 'One or both mémoires not found'
+      });
+    }
+    
+    const sourceMemoire = memoires.find(m => m.id_memoire.toString() === id);
+    const targetMemoire = memoires.find(m => m.id_memoire.toString() === targetId);
+    
+    // Extraire le texte des deux mémoires
+    const sourceText = await similarityChecker.extractTextFromPDF(sourceMemoire.file_path);
+    const targetText = await similarityChecker.extractTextFromPDF(targetMemoire.file_path);
+    
+    // Obtenir la comparaison détaillée
+    const details = await similarityChecker.getDetailedComparison(sourceText, targetText);
+    
+    res.json({
+      success: true,
+      details: {
+        ...details,
+        sourceMemoireTitle: sourceMemoire.libelle,
+        targetMemoireTitle: targetMemoire.libelle
+      }
+    });
+  } catch (error) {
+    console.error('Error getting detailed comparison:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get detailed comparison'
     });
   }
 });

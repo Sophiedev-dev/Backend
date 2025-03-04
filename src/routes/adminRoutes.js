@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const memoireController = require('../controllers/memoireController');
+const adminController = require('../controllers/adminController');
 
 // Route pour obtenir les statistiques d'administration
 router.get('/', async (req, res) => {
@@ -13,5 +14,13 @@ router.get('/', async (req, res) => {
     res.status(500).json({ message: "Erreur lors de la récupération des statistiques." });
   }
 });
+
+// Route pour obtenir les statistiques d'administration
+router.get('/', adminController.getAdminStats);
+
+// Routes pour la gestion des seuils de similarité
+router.get('/similarity-threshold', adminController.getSimilarityThreshold);
+router.post('/similarity-threshold', adminController.updateSimilarityThreshold);
+
 
 module.exports = router;

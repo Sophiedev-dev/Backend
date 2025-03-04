@@ -74,6 +74,71 @@ app.get("/uploads/:filename", async (req, res) => {
   }
 });
 
+// Mock route for similarity data - For demo purposes
+app.get("/api/memoire/:id/similarity", async (req, res) => {
+  const memoireId = req.params.id;
+  
+  // Get configured thresholds
+  let warningThreshold = 0;
+  let dangerThreshold = 0;
+  
+  try {
+    const [thresholds] = await db.promise().query(
+      "SELECT * FROM app_settings WHERE setting_key IN ('similarity_warning_threshold', 'similarity_danger_threshold')"
+    );
+    
+    if (thresholds.length > 0) {
+      const warningConfig = thresholds.find(t => t.setting_key === 'similarity_warning_threshold');
+      const dangerConfig = thresholds.find(t => t.setting_key === 'similarity_danger_threshold');
+      
+      warningThreshold = parseInt(warningConfig?.setting_value) || 0;
+      dangerThreshold = parseInt(dangerConfig?.setting_value) || 0;
+    }
+  } catch (error) {
+    console.error('Error fetching similarity thresholds:', error);
+    return res.status(500).json({ success: false, message: 'Error fetching thresholds' });
+  }
+  
+  // Mock similarity percentage (for demonstration)
+  const mockSimilarity = 75;
+  
+  // Determine level based on configured thresholds
+  let level, color, message;
+  
+  if (mockSimilarity >= dangerThreshold) {
+    level = 'danger';
+    color = 'red';
+    message = 'Taux élevé de similarité avec plusieurs mémoires';
+  } else if (mockSimilarity >= warningThreshold) {
+    level = 'warning';
+    color = 'orange';
+    message = 'Similarité modérée détectée avec d\'autres mémoires';
+  } else {
+    level = 'success';
+    color = 'green';
+    message = 'Faible taux de similarité, niveau acceptable';
+  }
+  
+  // Mock data for demonstration
+  const mockData = {
+    success: true,
+    results: [
+      { libelle: "Impact des réseaux sociaux sur la communication", name: "Impact des réseaux sociaux sur la communication", similarity: 80 },
+      { libelle: "L'évolution de la communication digitale", name: "L'évolution de la communication digitale", similarity: 65 }
+    ],
+    status: {
+      level: level,
+      percentage: mockSimilarity,
+      color: color,
+      message: message
+    }
+  };
+  
+  setTimeout(() => {
+    res.json(mockData);
+  }, 1000); // Add a delay to simulate processing
+});
+
 // Middleware pour les routes non trouvées
 app.use(notFound);
 
