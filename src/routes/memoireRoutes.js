@@ -148,38 +148,39 @@ router.post('/check-similarity', uploadMiddleware.single('file'), async (req, re
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: 'Aucun fichier n\'a été uploadé'
+        message: 'No file uploaded'
       });
     }
 
-    // Extract text from uploaded PDF
     const text = await similarityChecker.extractTextFromPDF(req.file.path);
-    
-    // Compare with existing mémoires
     const results = await similarityChecker.compareWithExistingMemoires(text);
-    
-    // Get status based on similarity
-    const status = similarityChecker.getSimilarityStatus(results);
-    
-    // Delete the temporary file
+    const status = await similarityChecker.getSimilarityStatus(results);
+
+    // Clean up the temporary file
     fs.unlinkSync(req.file.path);
 
     res.json({
       success: true,
-      results: results,  // Array of similar documents
-      status: status    // Status object with level, message, etc.
+      results: results.map(r => ({
+        ...r,
+        author: r.etudiant_nom || 'Unknown',
+        email: r.etudiant_email || 'No email',
+        submissionDate: r.date_soumission || 'Unknown date'
+      })),
+      status: {
+        ...status,
+        similarity_warning_threshold: status.warningThreshold,  // Updated to match DB name
+        similarity_danger_threshold: status.dangerThreshold     // Updated to match DB name
+      }
     });
   } catch (error) {
     console.error('Error checking similarity:', error);
-    
-    // Clean up the file if it exists
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
-    
     res.status(500).json({
       success: false,
-      message: error.message || 'Erreur lors de la vérification de similarité'
+      message: error.message || 'Error checking similarity'
     });
   }
 });
@@ -291,47 +292,49 @@ router.get('/:id/similarity', async (req, res) => {
   }
 });
 
-// Route to get detailed similarity results for a mémoire so for a report 
-router.get('/memoire/:id/similarity/:targetId/details', async (req, res) => {
+router.get('/:memoireId/similarity/:compareId/details', async (req, res) => {
   try {
-    const { id, targetId } = req.params;
+    const { memoireId, compareId } = req.params;
     
-    // Récupérer les deux mémoires
+    // Get both mémoires
     const [memoires] = await db.promise().query(
       'SELECT id_memoire, libelle, file_path FROM memoire WHERE id_memoire IN (?, ?)',
-      [id, targetId]
+      [memoireId, compareId]
     );
-    
+
     if (memoires.length !== 2) {
-      return res.status(404).json({
-        success: false,
-        message: 'One or both mémoires not found'
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Un ou plusieurs mémoires non trouvés' 
       });
     }
-    
-    const sourceMemoire = memoires.find(m => m.id_memoire.toString() === id);
-    const targetMemoire = memoires.find(m => m.id_memoire.toString() === targetId);
-    
-    // Extraire le texte des deux mémoires
+
+    const sourceMemoire = memoires.find(m => m.id_memoire.toString() === memoireId);
+    const targetMemoire = memoires.find(m => m.id_memoire.toString() === compareId);
+
+    // Extract text from both PDFs
     const sourceText = await similarityChecker.extractTextFromPDF(sourceMemoire.file_path);
     const targetText = await similarityChecker.extractTextFromPDF(targetMemoire.file_path);
-    
-    // Obtenir la comparaison détaillée
-    const details = await similarityChecker.getDetailedComparison(sourceText, targetText);
-    
+
+    // Get detailed comparison
+    const comparisonResult = await similarityChecker.getDetailedComparison(sourceText, targetText);
+
     res.json({
       success: true,
       details: {
-        ...details,
+        sourceText: sourceText,
+        targetText: targetText,
+        matches: comparisonResult.detailedMatches,
         sourceMemoireTitle: sourceMemoire.libelle,
         targetMemoireTitle: targetMemoire.libelle
       }
     });
+
   } catch (error) {
-    console.error('Error getting detailed comparison:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get detailed comparison'
+    console.error('Error getting detailed similarity:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Erreur lors de la récupération des détails de similarité' 
     });
   }
 });
