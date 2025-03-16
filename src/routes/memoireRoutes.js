@@ -339,6 +339,52 @@ router.get('/:memoireId/similarity/:compareId/details', async (req, res) => {
   }
 });
 
+// Add this route for detailed similarity comparison
+router.get('/api/memoire/:sourceId/similarity/:targetId/details', async (req, res) => {
+  try {
+    const { sourceId, targetId } = req.params;
+    
+    // Get both mémoires
+    const [memoires] = await db.promise().query(
+      'SELECT id_memoire, libelle, file_path FROM memoire WHERE id_memoire IN (?, ?)',
+      [sourceId, targetId]
+    );
+
+    if (memoires.length !== 2) {
+      return res.status(404).json({
+        success: false,
+        message: 'Un ou plusieurs mémoires non trouvés'
+      });
+    }
+
+    const sourceMemoire = memoires.find(m => m.id_memoire.toString() === sourceId);
+    const targetMemoire = memoires.find(m => m.id_memoire.toString() === targetId);
+
+    // Extract text from both PDFs
+    const sourceText = await similarityChecker.extractTextFromPDF(sourceMemoire.file_path);
+    const targetText = await similarityChecker.extractTextFromPDF(targetMemoire.file_path);
+
+    // Get detailed comparison
+    const comparison = await similarityChecker.getDetailedComparison(sourceText, targetText);
+
+    res.json({
+      success: true,
+      details: {
+        matches: comparison.detailedMatches,
+        sourceMemoireTitle: sourceMemoire.libelle,
+        targetMemoireTitle: targetMemoire.libelle
+      }
+    });
+
+  } catch (error) {
+    console.error('Error getting detailed similarity:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la récupération des détails de similarité'
+    });
+  }
+});
+
 // Route pour récupérer tous les mémoires
 router.get('/', async (req, res) => {
   try {
