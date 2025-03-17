@@ -4,7 +4,7 @@ const { upload } = require('../config/upload');
 const { sendEmail } = require('../config/email');
 const db = require('../config/db');
 const similarityChecker = require('../utils/similarityChecker');
-const { signDocument } = require('../utils/crypto');
+const { signDocument, verifySignature } = require('../utils/crypto');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -39,6 +39,72 @@ const uploadMiddleware = multer({
     }
   }
 });
+
+// Add this route for signature verification
+router.post('/verify-signature', uploadMiddleware.single('file'), async (req, res) => {
+  try {
+    if (!req.file || !req.body.publicKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'File and public key are required'
+      });
+    }
+
+    // Get the file path and public key
+    const filePath = req.file.path;
+    const publicKey = req.body.publicKey;
+
+    // Query the database to get the signature details
+    const [signature] = await db.promise().query(
+      `SELECT ds.*, m.libelle, a.name as admin_name, ds.signed_at 
+       FROM digital_signatures ds
+       JOIN memoire m ON ds.id_memoire = m.id_memoire
+       JOIN admin a ON ds.id_admin = a.id_admin
+       WHERE m.file_path = ?`,
+      [filePath]
+    );
+
+    if (!signature.length) {
+      return res.json({
+        success: false,
+        message: 'No digital signature found for this document'
+      });
+    }
+
+    // Verify the signature using the provided public key
+    const isValid = verifySignature(signature[0].signature, publicKey);
+
+    if (isValid) {
+      res.json({
+        success: true,
+        message: 'Document signature verified successfully',
+        details: {
+          documentTitle: signature[0].libelle,
+          signedBy: signature[0].admin_name,
+          signedAt: signature[0].signed_at
+        }
+      });
+    } else {
+      res.json({
+        success: false,
+        message: 'Invalid signature'
+      });
+    }
+
+  } catch (error) {
+    console.error('Error verifying signature:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error verifying document signature'
+    });
+  } finally {
+    // Clean up the uploaded file
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+  }
+});
+
 
 // Move this route to the top, before any routes with path parameters
 router.get('/memoire', async (req, res) => {
