@@ -3,6 +3,7 @@ const router = express.Router();
 const { upload } = require('../config/upload');
 const { sendEmail } = require('../config/email');
 const db = require('../config/db');
+const { PDFDocument, rgb } = require('pdf-lib');
 const similarityChecker = require('../utils/similarityChecker');
 const { signDocument, verifySignature } = require('../utils/crypto');
 const multer = require('multer');
@@ -105,6 +106,76 @@ router.post('/verify-signature', uploadMiddleware.single('file'), async (req, re
   }
 });
 
+// Add this route for downloading signed documents
+router.get('/:id/download', async (req, res) => {
+  try {
+    // Get memoire and signature details
+    const [memoire] = await db.promise().query(
+      `SELECT m.*, ds.signature, ds.public_key, a.name as admin_name, 
+              ds.signed_at, a.email as admin_email
+       FROM memoire m 
+       LEFT JOIN digital_signatures ds ON m.id_memoire = ds.id_memoire
+       LEFT JOIN admin a ON ds.id_admin = a.id_admin
+       WHERE m.id_memoire = ?`,
+      [req.params.id]
+    );
+
+    if (!memoire.length) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    const filePath = path.resolve(__dirname, '..', '..', memoire[0].file_path);
+    
+    // Read the PDF file
+    const existingPdfBytes = fs.readFileSync(filePath);
+    const pdfDoc = await PDFDocument.load(existingPdfBytes);
+    
+    // Add signature page
+    const page = pdfDoc.addPage();
+    const { width, height } = page.getSize();
+    
+    // Add signature information with better formatting
+    page.drawText('Document Authentication Certificate', {
+      x: 50,
+      y: height - 50,
+      size: 24,
+      color: rgb(0.1, 0.1, 0.1)
+    });
+    
+    const textLines = [
+      { text: `Document: ${memoire[0].libelle}`, y: height - 100 },
+      { text: `Validated by: ${memoire[0].admin_name}`, y: height - 130 },
+      { text: `Admin Email: ${memoire[0].admin_email}`, y: height - 160 },
+      { text: `Validation Date: ${new Date(memoire[0].signed_at).toLocaleString()}`, y: height - 190 },
+      { text: 'Digital Signature:', y: height - 230 },
+      { text: memoire[0].signature, y: height - 250, size: 8 },
+      { text: 'Public Key:', y: height - 290 },
+      { text: memoire[0].public_key, y: height - 310, size: 8 }
+    ];
+
+    textLines.forEach(line => {
+      page.drawText(line.text, {
+        x: 50,
+        y: line.y,
+        size: line.size || 12,
+        color: rgb(0.1, 0.1, 0.1),
+        maxWidth: width - 100
+      });
+    });
+
+    // Save the modified PDF
+    const pdfBytes = await pdfDoc.save();
+    
+    // Send the modified PDF
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=${memoire[0].libelle}_signed.pdf`);
+    res.send(Buffer.from(pdfBytes));
+
+  } catch (error) {
+    console.error('Error downloading signed document:', error);
+    res.status(500).json({ message: 'Error downloading document' });
+  }
+});
 
 // Move this route to the top, before any routes with path parameters
 router.get('/memoire', async (req, res) => {
