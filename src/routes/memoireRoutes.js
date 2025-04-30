@@ -3,7 +3,9 @@ const router = express.Router();
 const { upload } = require('../config/upload');
 const { sendEmail } = require('../config/email');
 const db = require('../config/db');
-const { signDocument } = require('../utils/crypto');
+const { PDFDocument, rgb } = require('pdf-lib');
+const similarityChecker = require('../utils/similarityChecker');
+const { signDocument, verifySignature } = require('../utils/crypto');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -36,6 +38,142 @@ const uploadMiddleware = multer({
     } else {
       cb(new Error('Seuls les fichiers PDF sont acceptés'));
     }
+  }
+});
+
+// Add this route for signature verification
+router.post('/verify-signature', uploadMiddleware.single('file'), async (req, res) => {
+  try {
+    if (!req.file || !req.body.publicKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'File and public key are required'
+      });
+    }
+
+    // Get the file path and public key
+    const filePath = req.file.path;
+    const publicKey = req.body.publicKey;
+
+    // Query the database to get the signature details
+    const [signature] = await db.promise().query(
+      `SELECT ds.*, m.libelle, a.name as admin_name, ds.signed_at 
+       FROM digital_signatures ds
+       JOIN memoire m ON ds.id_memoire = m.id_memoire
+       JOIN admin a ON ds.id_admin = a.id_admin
+       WHERE m.file_path = ?`,
+      [filePath]
+    );
+
+    if (!signature.length) {
+      return res.json({
+        success: false,
+        message: 'No digital signature found for this document'
+      });
+    }
+
+    // Verify the signature using the provided public key
+    const isValid = verifySignature(signature[0].signature, publicKey);
+
+    if (isValid) {
+      res.json({
+        success: true,
+        message: 'Document signature verified successfully',
+        details: {
+          documentTitle: signature[0].libelle,
+          signedBy: signature[0].admin_name,
+          signedAt: signature[0].signed_at
+        }
+      });
+    } else {
+      res.json({
+        success: false,
+        message: 'Invalid signature'
+      });
+    }
+
+  } catch (error) {
+    console.error('Error verifying signature:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error verifying document signature'
+    });
+  } finally {
+    // Clean up the uploaded file
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+  }
+});
+
+// Add this route for downloading signed documents
+router.get('/:id/download', async (req, res) => {
+  try {
+    // Get memoire and signature details
+    const [memoire] = await db.promise().query(
+      `SELECT m.*, ds.signature, ds.public_key, a.name as admin_name, 
+              ds.signed_at, a.email as admin_email
+       FROM memoire m 
+       LEFT JOIN digital_signatures ds ON m.id_memoire = ds.id_memoire
+       LEFT JOIN admin a ON ds.id_admin = a.id_admin
+       WHERE m.id_memoire = ?`,
+      [req.params.id]
+    );
+
+    if (!memoire.length) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    const filePath = path.resolve(__dirname, '..', '..', memoire[0].file_path);
+    
+    // Read the PDF file
+    const existingPdfBytes = fs.readFileSync(filePath);
+    const pdfDoc = await PDFDocument.load(existingPdfBytes);
+    
+    // Add signature page
+    const page = pdfDoc.addPage();
+    const { width, height } = page.getSize();
+    
+    // Add signature information with better formatting
+    page.drawText('Document Authentication Certificate', {
+      x: 50,
+      y: height - 50,
+      size: 24,
+      color: rgb(0.1, 0.1, 0.1)
+    });
+    
+    const textLines = [
+      { text: `Document: ${memoire[0].libelle}`, y: height - 100 },
+      { text: `Validated by: ${memoire[0].admin_name}`, y: height - 130 },
+      { text: `Admin Email: ${memoire[0].admin_email}`, y: height - 160 },
+      { text: `Validation Date: ${new Date(memoire[0].signed_at).toLocaleString()}`, y: height - 190 },
+      { text: 'Digital Signature:', y: height - 230 },
+      { text: memoire[0].signature, y: height - 250, size: 8 },
+      { text: 'Public Key:', y: height - 290 },
+      { text: memoire[0].public_key, y: height - 310, size: 8 }
+    ];
+
+    textLines.forEach(line => {
+      page.drawText(line.text, {
+        x: 50,
+        y: line.y,
+        size: line.size || 12,
+        color: rgb(0.1, 0.1, 0.1),
+        maxWidth: width - 100
+      });
+    });
+
+    // Save the modified PDF
+    const pdfBytes = await pdfDoc.save();
+    
+    // Send the modified PDF
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=${memoire[0].libelle}_signed.pdf`);
+    res.send(Buffer.from(pdfBytes));
+
+  } catch (error) {
+    console.error('Error downloading signed document:', error);
+    res.status(500).json({ message: 'Error downloading document' });
   }
 });
 
@@ -141,7 +279,50 @@ router.get('/memoires-with-students', async (req, res) => {
   }
 });
 
-// Route pour soumettre un nouveau mémoire
+// New route for similarity checking
+router.post('/check-similarity', uploadMiddleware.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded'
+      });
+    }
+
+    const text = await similarityChecker.extractTextFromPDF(req.file.path);
+    const results = await similarityChecker.compareWithExistingMemoires(text);
+    const status = await similarityChecker.getSimilarityStatus(results);
+
+    // Clean up the temporary file
+    fs.unlinkSync(req.file.path);
+
+    res.json({
+      success: true,
+      results: results.map(r => ({
+        ...r,
+        author: r.etudiant_nom || 'Unknown',
+        email: r.etudiant_email || 'No email',
+        submissionDate: r.date_soumission || 'Unknown date'
+      })),
+      status: {
+        ...status,
+        similarity_warning_threshold: status.warningThreshold,  // Updated to match DB name
+        similarity_danger_threshold: status.dangerThreshold     // Updated to match DB name
+      }
+    });
+  } catch (error) {
+    console.error('Error checking similarity:', error);
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error checking similarity'
+    });
+  }
+});
+
+// Modified route for submitting a new mémoire with similarity check
 router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
   try {
     // Set content-type header
@@ -166,6 +347,11 @@ router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
       id_etudiant
     } = req.body;
 
+    // Check for similarity
+    const text = await similarityChecker.extractTextFromPDF(req.file.path);
+    const similarResults = await similarityChecker.compareWithExistingMemoires(text);
+    const status = similarityChecker.getSimilarityStatus(similarResults);
+
     // Insérer dans la base de données
     const [result] = await db.promise().query(
       `INSERT INTO memoire (
@@ -186,17 +372,152 @@ router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
       ]
     );
 
+    // Save similarity results
+    await similarityChecker.saveComparisonResults(result.insertId, similarResults);
+
     res.status(201).json({
       success: true,
       message: 'Mémoire soumis avec succès',
-      memoireId: result.insertId
+      memoireId: result.insertId,
+      similarityResults: {
+        results: similarResults,
+        status
+      }
     });
 
   } catch (error) {
     console.error('Erreur lors de la soumission:', error);
+    
+    // Clean up the file if it exists
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    
     res.status(500).json({
       success: false,
       message: error.message || 'Erreur lors de la sauvegarde du mémoire'
+    });
+  }
+});
+
+// Route to get similarity results for a mémoire
+router.get('/:id/similarity', async (req, res) => {
+  try {
+    const memoireId = req.params.id;
+    const results = await similarityChecker.getComparisonResults(memoireId);
+    
+    if (!results) {
+      return res.status(404).json({
+        success: false,
+        message: 'No similarity results found for this mémoire'
+      });
+    }
+    
+    const status = similarityChecker.getSimilarityStatus(results);
+    
+    res.json({
+      success: true,
+      results,
+      status
+    });
+  } catch (error) {
+    console.error('Error getting similarity results:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error getting similarity results'
+    });
+  }
+});
+
+router.get('/:memoireId/similarity/:compareId/details', async (req, res) => {
+  try {
+    const { memoireId, compareId } = req.params;
+    
+    // Get both mémoires
+    const [memoires] = await db.promise().query(
+      'SELECT id_memoire, libelle, file_path FROM memoire WHERE id_memoire IN (?, ?)',
+      [memoireId, compareId]
+    );
+
+    if (memoires.length !== 2) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Un ou plusieurs mémoires non trouvés' 
+      });
+    }
+
+    const sourceMemoire = memoires.find(m => m.id_memoire.toString() === memoireId);
+    const targetMemoire = memoires.find(m => m.id_memoire.toString() === compareId);
+
+    // Extract text from both PDFs
+    const sourceText = await similarityChecker.extractTextFromPDF(sourceMemoire.file_path);
+    const targetText = await similarityChecker.extractTextFromPDF(targetMemoire.file_path);
+
+    // Get detailed comparison
+    const comparisonResult = await similarityChecker.getDetailedComparison(sourceText, targetText);
+
+    res.json({
+      success: true,
+      details: {
+        sourceText: sourceText,
+        targetText: targetText,
+        matches: comparisonResult.detailedMatches,
+        sourceMemoireTitle: sourceMemoire.libelle,
+        targetMemoireTitle: targetMemoire.libelle
+      }
+    });
+
+  } catch (error) {
+    console.error('Error getting detailed similarity:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Erreur lors de la récupération des détails de similarité' 
+    });
+  }
+});
+
+// Add this route for detailed similarity comparison
+router.get('/api/memoire/:sourceId/similarity/:targetId/details', async (req, res) => {
+  try {
+    const { sourceId, targetId } = req.params;
+    
+    // Get both mémoires
+    const [memoires] = await db.promise().query(
+      'SELECT id_memoire, libelle, file_path FROM memoire WHERE id_memoire IN (?, ?)',
+      [sourceId, targetId]
+    );
+
+    if (memoires.length !== 2) {
+      return res.status(404).json({
+        success: false,
+        message: 'Un ou plusieurs mémoires non trouvés'
+      });
+    }
+
+    const sourceMemoire = memoires.find(m => m.id_memoire.toString() === sourceId);
+    const targetMemoire = memoires.find(m => m.id_memoire.toString() === targetId);
+
+    // Extract text from both PDFs
+    const sourceText = await similarityChecker.extractTextFromPDF(sourceMemoire.file_path);
+    const targetText = await similarityChecker.extractTextFromPDF(targetMemoire.file_path);
+
+    // Get detailed comparison
+    const comparison = await similarityChecker.getDetailedComparison(sourceText, targetText);
+
+    res.json({
+      success: true,
+      details: {
+        matches: comparison.detailedMatches,
+        sourceMemoireTitle: sourceMemoire.libelle,
+        targetMemoireTitle: targetMemoire.libelle
+      }
+    });
+
+  } catch (error) {
+    console.error('Error getting detailed similarity:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la récupération des détails de similarité'
     });
   }
 });
