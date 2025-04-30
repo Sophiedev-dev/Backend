@@ -1,5 +1,5 @@
 const db = require('../config/db');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 
 // Vérifier les identifiants de connexion
 const executeQuery = (query, params, type) => {
