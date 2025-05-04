@@ -29,7 +29,8 @@ const app = express();
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://8eec-129-0-205-51.ngrok-free.app'
+    'https://8eec-129-0-205-51.ngrok-free.app',
+    'https://projetsoutenance-al7l.onrender.com/'
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
