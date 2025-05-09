@@ -9,26 +9,46 @@ const { signDocument, verifySignature } = require('../utils/crypto');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const multerS3 = require('multer-s3');
+const { S3Client, GetObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 
-// Créer le dossier uploads s'il n'existe pas
-const uploadDir = 'uploads/memoires';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
+const s3 = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
   }
 });
 
+// Créer le dossier uploads s'il n'existe pas
+// const uploadDir = 'uploads/memoires';
+// if (!fs.existsSync(uploadDir)) {
+//   fs.mkdirSync(uploadDir, { recursive: true });
+// }
+
+// const storage = multer.diskStorage({
+//   destination: function (req, file, cb) {
+//     cb(null, uploadDir);
+//   },
+//   filename: function (req, file, cb) {
+//     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+//     cb(null, uniqueSuffix + path.extname(file.originalname));
+//   }
+// });
+
+// Remplacer la configuration du storage par celle de S3
 const uploadMiddleware = multer({
-  storage: storage,
+  storage: multerS3({
+    s3: s3,
+    bucket: process.env.AWS_BUCKET_NAME,
+    key: function (req, file, cb) {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      cb(null, 'memoires/' + uniqueSuffix + '-' + file.originalname);
+    },
+    contentType: multerS3.AUTO_CONTENT_TYPE
+  }),
   limits: {
     fileSize: 10 * 1024 * 1024 // 10MB
   },
@@ -52,7 +72,7 @@ router.post('/verify-signature', uploadMiddleware.single('file'), async (req, re
     }
 
     // Get the file path and public key
-    const filePath = req.file.path;
+    const filePath = req.file.key; // S3 utilise 'key' au lieu de 'path'
     const publicKey = req.body.publicKey;
 
     // Query the database to get the signature details
@@ -109,7 +129,6 @@ router.post('/verify-signature', uploadMiddleware.single('file'), async (req, re
 // Add this route for downloading signed documents
 router.get('/:id/download', async (req, res) => {
   try {
-    // Get memoire details
     const [memoire] = await db.promise().query(
       `SELECT * FROM memoire WHERE id_memoire = ?`,
       [req.params.id]
@@ -119,17 +138,13 @@ router.get('/:id/download', async (req, res) => {
       return res.status(404).json({ message: 'Document not found' });
     }
 
-    const filePath = path.resolve(__dirname, '..', memoire[0].file_path);
-    
-    // Vérifier que le fichier existe
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ message: 'Fichier PDF non trouvé' });
-    }
+    const command = new GetObjectCommand({
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: memoire[0].file_path
+    });
 
-    // Envoyer le fichier directement
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename=${memoire[0].libelle.replace(/\s+/g, '_')}.pdf`);
-    res.sendFile(filePath);
+    const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+    res.redirect(url);
 
   } catch (error) {
     console.error('Error downloading document:', error);
@@ -252,12 +267,15 @@ router.post('/check-similarity', uploadMiddleware.single('file'), async (req, re
       });
     }
 
-    const text = await similarityChecker.extractTextFromPDF(req.file.path);
+    // Récupérer le fichier depuis S3
+    const command = new GetObjectCommand({
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: req.file.key
+    });
+    
+    const text = await similarityChecker.extractTextFromS3PDF(s3, command);
     const results = await similarityChecker.compareWithExistingMemoires(text);
     const status = await similarityChecker.getSimilarityStatus(results);
-
-    // Clean up the temporary file
-    fs.unlinkSync(req.file.path);
 
     res.json({
       success: true,
@@ -269,15 +287,12 @@ router.post('/check-similarity', uploadMiddleware.single('file'), async (req, re
       })),
       status: {
         ...status,
-        similarity_warning_threshold: status.warningThreshold,  // Updated to match DB name
-        similarity_danger_threshold: status.dangerThreshold     // Updated to match DB name
+        similarity_warning_threshold: status.warningThreshold,
+        similarity_danger_threshold: status.dangerThreshold
       }
     });
   } catch (error) {
     console.error('Error checking similarity:', error);
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
     res.status(500).json({
       success: false,
       message: error.message || 'Error checking similarity'
@@ -310,12 +325,17 @@ router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
       id_etudiant
     } = req.body;
 
-    // Check for similarity
-    const text = await similarityChecker.extractTextFromPDF(req.file.path);
+    // Récupérer le fichier depuis S3
+    const command = new GetObjectCommand({
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: req.file.key
+    });
+    
+    const text = await similarityChecker.extractTextFromS3PDF(s3, command);
     const similarResults = await similarityChecker.compareWithExistingMemoires(text);
     const status = similarityChecker.getSimilarityStatus(similarResults);
 
-    // Insérer dans la base de données
+    // Insérer dans la base de données avec le chemin S3
     const [result] = await db.promise().query(
       `INSERT INTO memoire (
         libelle, annee, cycle, speciality, university,
@@ -331,11 +351,10 @@ router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
         description,
         mention,
         id_etudiant,
-        req.file.path
+        req.file.key // Utiliser la clé S3 au lieu du chemin local
       ]
     );
 
-    // Save similarity results
     await similarityChecker.saveComparisonResults(result.insertId, similarResults);
 
     res.status(201).json({
@@ -526,19 +545,15 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    // Delete the file if it exists
+    // Remplacer la suppression locale par la suppression S3
     if (memoire[0].file_path) {
-      const filePath = path.resolve(__dirname, '..', '..', memoire[0].file_path.replace(/\//g, path.sep));
-      if (fs.existsSync(filePath)) {
-        try {
-          fs.unlinkSync(filePath);
-          console.log('File deleted successfully');
-        } catch (fileError) {
-          console.error('Error deleting file:', fileError);
-        }
-      }
+      const deleteCommand = new DeleteObjectCommand({
+        Bucket: process.env.AWS_BUCKET_NAME,
+        Key: memoire[0].file_path
+      });
+      await s3.send(deleteCommand);
     }
-
+    
     // Finally delete the memoire
     const [result] = await db.promise().query(
       'DELETE FROM memoire WHERE id_memoire = ?',

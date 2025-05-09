@@ -2,6 +2,11 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const dotenv = require("dotenv");
+const { S3Client } = require("@aws-sdk/client-s3");
+const multerS3 = require("multer-s3");
+const multer = require("multer");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const { GetObjectCommand } = require("@aws-sdk/client-s3");
 
 // Chargement des variables d'environnement
 dotenv.config();
@@ -53,6 +58,28 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/stats", statsRoutes);
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+// Configuration S3
+const s3 = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+  }
+});
+
+// Configuration de multer pour S3
+const upload = multer({
+  storage: multerS3({
+    s3: s3,
+    bucket: process.env.AWS_BUCKET_NAME,
+    key: function (req, file, cb) {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      cb(null, 'memoires/' + uniqueSuffix + '-' + file.originalname);
+    },
+    contentType: multerS3.AUTO_CONTENT_TYPE
+  })
+});
+
 // Route pour obtenir un fichier
 app.get("/uploads/:filename", async (req, res) => {
   const fileName = req.params.filename;
@@ -75,6 +102,39 @@ app.get("/uploads/:filename", async (req, res) => {
   } catch (error) {
     console.error("Fichier non trouvé :", filePath);
     res.status(404).json({ message: "Fichier non trouvé", filePath });
+  }
+});
+
+// Modifier la route pour récupérer un fichier PDF
+// Modifier la route pour utiliser la nouvelle méthode de génération d'URL signée
+app.get("/api/memoire/:id/file", async (req, res) => {
+  try {
+    const [memoire] = await db.promise().query(
+      "SELECT file_path FROM memoire WHERE id_memoire = ?",
+      [req.params.id]
+    );
+
+    if (!memoire.length || !memoire[0].file_path) {
+      return res.status(404).json({
+        success: false,
+        message: "Document non trouvé"
+      });
+    }
+
+    const command = new GetObjectCommand({
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: memoire[0].file_path
+    });
+
+    const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+
+    res.redirect(url);
+  } catch (error) {
+    console.error("Erreur lors de la récupération du fichier:", error);
+    res.status(500).json({
+      success: false,
+      message: "Erreur lors de la récupération du fichier"
+    });
   }
 });
 
