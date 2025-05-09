@@ -273,24 +273,32 @@ router.post('/check-similarity', uploadMiddleware.single('file'), async (req, re
       Key: req.file.key
     });
     
-    const text = await similarityChecker.extractTextFromS3PDF(s3, command);
-    const results = await similarityChecker.compareWithExistingMemoires(text);
-    const status = await similarityChecker.getSimilarityStatus(results);
+    try {
+      const text = await similarityChecker.extractTextFromS3PDF(s3, command);
+      const results = await similarityChecker.compareWithExistingMemoires(text);
+      const status = await similarityChecker.getSimilarityStatus(results);
 
-    res.json({
-      success: true,
-      results: results.map(r => ({
-        ...r,
-        author: r.etudiant_nom || 'Unknown',
-        email: r.etudiant_email || 'No email',
-        submissionDate: r.date_soumission || 'Unknown date'
-      })),
-      status: {
-        ...status,
-        similarity_warning_threshold: status.warningThreshold,
-        similarity_danger_threshold: status.dangerThreshold
-      }
-    });
+      res.json({
+        success: true,
+        results: results.map(r => ({
+          ...r,
+          author: r.etudiant_nom || 'Unknown',
+          email: r.etudiant_email || 'No email',
+          submissionDate: r.date_soumission || 'Unknown date'
+        })),
+        status: {
+          ...status,
+          similarity_warning_threshold: status.warningThreshold,
+          similarity_danger_threshold: status.dangerThreshold
+        }
+      });
+    } catch (error) {
+      console.error('Error processing file:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors du traitement du fichier pour la vérification de similarité'
+      });
+    }
   } catch (error) {
     console.error('Error checking similarity:', error);
     res.status(500).json({
