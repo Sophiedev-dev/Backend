@@ -69,7 +69,7 @@ const s3 = new S3Client({
 
 // Configuration de multer pour S3
 const upload = multer({
-  storage: multerS3({
+  storage: multerS3({ 
     s3: s3,
     bucket: process.env.AWS_BUCKET_NAME,
     key: function (req, file, cb) {

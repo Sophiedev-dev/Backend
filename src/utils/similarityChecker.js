@@ -1,7 +1,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const pdf = require('pdf-parse');
+const pdfParse = require('pdf-parse');
 const stringSimilarity = require('string-similarity');
 const natural = require('natural');
 const db = require('../config/db');
@@ -79,14 +79,23 @@ async function getSimilarityStatus(results) {
  * @param {string} pdfPath - Path to the PDF file
  * @returns {Promise<string>} - Extracted text
  */
-async function extractTextFromPDF(pdfPath) {
+// async function extractTextFromPDF(pdfPath) {
+//   try {
+//     const dataBuffer = fs.readFileSync(pdfPath);
+//     const data = await pdf(dataBuffer);
+//     return data.text;
+//   } catch (error) {
+//     console.error('Error extracting text from PDF:', error);
+//     throw new Error(' to extract text from PDF');
+//   }
+// }
+
+async function extractTextFromPDF(buffer) {
   try {
-    const dataBuffer = fs.readFileSync(pdfPath);
-    const data = await pdf(dataBuffer);
+    const data = await pdfParse(buffer);
     return data.text;
-  } catch (error) {
-    console.error('Error extracting text from PDF:', error);
-    throw new Error(' to extract text from PDF');
+  } catch (err) {
+    throw new Error('Erreur lors de l\'extraction du texte : ' + err.message);
   }
 }
 

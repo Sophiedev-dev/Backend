@@ -12,6 +12,8 @@ const fs = require('fs');
 const multerS3 = require('multer-s3');
 const { S3Client, GetObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const streamToBuffer = require('../utils/streamToBuffer');
+
 
 
 const s3 = new S3Client({
@@ -72,7 +74,7 @@ router.post('/verify-signature', uploadMiddleware.single('file'), async (req, re
     }
 
     // Get the file path and public key
-    const filePath = req.file.key; // S3 utilise 'key' au lieu de 'path'
+    const filePath = req.file.location; // S3 utilise 'key' au lieu de 'path'
     const publicKey = req.body.publicKey;
 
     // Query the database to get the signature details
@@ -135,20 +137,28 @@ router.get('/:id/download', async (req, res) => {
     );
 
     if (!memoire.length) {
-      return res.status(404).json({ message: 'Document not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Document not found' 
+      });
     }
 
     const command = new GetObjectCommand({
       Bucket: process.env.AWS_BUCKET_NAME,
-      Key: memoire[0].file_path
+      Key: memoire[0].file_path.replace(/^https:\/\/.*\.amazonaws\.com\//, '')
     });
 
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
-    res.redirect(url);
+    
+    res.json({ 
+      success: true,
+      url: url 
+    });
 
   } catch (error) {
     console.error('Error downloading document:', error);
     res.status(500).json({ 
+      success: false,
       message: 'Error downloading document',
       error: error.message 
     });
@@ -266,15 +276,21 @@ router.post('/check-similarity', uploadMiddleware.single('file'), async (req, re
         message: 'No file uploaded'
       });
     }
-
+// console.log('file');
+// console.log(req.file);
     // Récupérer le fichier depuis S3
     const command = new GetObjectCommand({
       Bucket: process.env.AWS_BUCKET_NAME,
-      Key: req.file.key
+      Key: req.file.key 
     });
-    
+    const response = await s3.send(command);
+
+// Convertir le Body (qui est un stream) en buffer
+const buffer = await streamToBuffer.streamToBuffer(response.Body);
     try {
-      const text = await similarityChecker.extractTextFromS3PDF(s3, command);
+      // console.log("commadeeeeeeeeeeeeeeeeeeee");
+      // console.log(command);
+      const text = await similarityChecker.extractTextFromPDF(buffer);
       const results = await similarityChecker.compareWithExistingMemoires(text);
       const status = await similarityChecker.getSimilarityStatus(results);
 
@@ -311,6 +327,7 @@ router.post('/check-similarity', uploadMiddleware.single('file'), async (req, re
 // Modified route for submitting a new mémoire with similarity check
 router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
   try {
+    console.log(req.file)
     // Set content-type header
     res.setHeader('Content-Type', 'application/json');
 
@@ -338,11 +355,15 @@ router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
       Bucket: process.env.AWS_BUCKET_NAME,
       Key: req.file.key
     });
+    const response = await s3.send(command);
+
+// Convertir le Body (qui est un stream) en buffer
+const buffer = await streamToBuffer.streamToBuffer(response.Body);
     
-    const text = await similarityChecker.extractTextFromS3PDF(s3, command);
+    const text = await similarityChecker.extractTextFromPDF(buffer);
     const similarResults = await similarityChecker.compareWithExistingMemoires(text);
     const status = similarityChecker.getSimilarityStatus(similarResults);
-
+console.log(req.file.location);
     // Insérer dans la base de données avec le chemin S3
     const [result] = await db.promise().query(
       `INSERT INTO memoire (
@@ -359,7 +380,7 @@ router.post('/memoire', uploadMiddleware.single('file'), async (req, res) => {
         description,
         mention,
         id_etudiant,
-        req.file.key // Utiliser la clé S3 au lieu du chemin local
+        req.file.location // Utiliser la clé S3 au lieu du chemin local
       ]
     );
 
@@ -585,7 +606,8 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// Route pour obtenir un mémoire spécifique
+// ... existing code ...
+
 router.get('/:id', async (req, res) => {
   try {
     const [memoire] = await db.promise().query(
@@ -610,10 +632,20 @@ router.get('/:id', async (req, res) => {
       });
     }
 
+    // Générer une URL signée pour le fichier S3
+    const command = new GetObjectCommand({
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: memoire[0].file_path
+    });
+    
+    const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+
     const memoireWithValidation = {
       ...memoire[0],
       validated_by_name: memoire[0].admin_name || null,
-      validation_date: memoire[0].validation_date || null
+      validation_date: memoire[0].validation_date || null,
+      file_url: memoire[0].location, 
+      // file_url: signedUrl 
     };
 
     res.json({
@@ -628,6 +660,8 @@ router.get('/:id', async (req, res) => {
     });
   }
 });
+
+// ... existing code ...
 
 // Route pour récupérer les mémoires d'un étudiant
 router.get('/etudiant/:id', async (req, res) => {
