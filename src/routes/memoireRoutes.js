@@ -606,7 +606,6 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// ... existing code ...
 
 router.get('/:id', async (req, res) => {
   try {
@@ -661,7 +660,6 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// ... existing code ...
 
 // Route pour récupérer les mémoires d'un étudiant
 router.get('/etudiant/:id', async (req, res) => {
@@ -997,5 +995,36 @@ router.get('/memoireEtudiant/:id', async (req, res) => {
   }
 });
 
+// Ajouter cette nouvelle route pour récupérer la signature
+router.get('/:id/signature', async (req, res) => {
+  try {
+    const [signature] = await db.promise().query(
+      `SELECT ds.signature, ds.public_key, ds.signed_at
+       FROM digital_signatures ds
+       WHERE ds.id_memoire = ?`,
+      [req.params.id]
+    );
+
+    if (!signature.length) {
+      return res.json({
+        success: false,
+        message: 'Aucune signature trouvée pour ce mémoire'
+      });
+    }
+
+    res.json({
+      success: true,
+      signature: signature[0].signature,
+      public_key: signature[0].public_key,
+      signed_at: signature[0].signed_at
+    });
+  } catch (error) {
+    console.error('Erreur lors de la récupération de la signature:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la récupération de la signature'
+    });
+  }
+});
 
 module.exports = router;
