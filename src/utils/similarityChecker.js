@@ -5,6 +5,154 @@ const pdfParse = require('pdf-parse');
 const stringSimilarity = require('string-similarity');
 const natural = require('natural');
 const db = require('../config/db');
+const { S3 } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+
+// Initialiser le client S3
+const s3 = new S3({
+  region: 'eu-north-1', // Spécifier explicitement la région
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+  }
+});
+
+// Fonction pour télécharger un fichier depuis S3
+async function downloadFromS3(bucketName, key) {
+  try {
+    // Normaliser la clé S3
+    const normalizedKey = key
+      .replace(/\\/g, '/') // Remplacer les backslashes par des forward slashes
+      .replace(/\/+/g, '/') // Remplacer les doubles slashes par un seul
+      .replace(/^\//, '') // Supprimer le slash initial s'il existe
+      .trim();
+
+    console.log('Tentative de téléchargement depuis S3:', {
+      bucket: bucketName,
+      originalKey: key,
+      normalizedKey: normalizedKey
+    });
+
+    const response = await s3.getObject({
+      Bucket: bucketName,
+      Key: normalizedKey
+    });
+    
+    if (!response.Body) {
+      throw new Error('Réponse S3 invalide - pas de contenu');
+    }
+
+    return await response.Body.transformToByteArray();
+  } catch (error) {
+    console.error('Erreur détaillée lors du téléchargement depuis S3:', {
+      error: error.message,
+      code: error.code,
+      statusCode: error.$metadata?.httpStatusCode
+    });
+    throw new Error(`Impossible de télécharger le fichier depuis S3: ${error.message}`);
+  }
+}
+
+async function compareWithExistingMemoires(text, threshold = 0.5) {
+  try {
+    const bucketName = 'archivamemo'; // Définir la variable au début de la fonction
+    
+    const [memoires] = await db.promise().query(`
+      SELECT m.id_memoire, m.libelle, m.file_path,
+             cr.results_json as previous_comparison
+      FROM memoire m
+      LEFT JOIN comparison_results cr ON m.id_memoire = cr.memoire_id
+      WHERE m.status = 'validated'
+    `);
+
+    const results = [];
+    
+    for (const memoire of memoires) {
+      try {
+        const fileName = path.basename(memoire.file_path);
+        const s3Key = `memoires/${fileName}`;
+
+        console.log(`Tentative de téléchargement depuis S3:`, {
+          bucket: bucketName,
+          key: s3Key,
+          region: process.env.AWS_REGION
+        });
+
+        // Télécharger le fichier depuis S3
+        const fileBuffer = await downloadFromS3(bucketName, s3Key);
+        
+        // Extraire le texte du PDF
+        const memoireText = await extractTextFromPDF(fileBuffer);
+        
+        if (!memoireText) {
+          console.warn(`Pas de texte extrait pour le mémoire ${memoire.id_memoire}`);
+          continue;
+        }
+
+        // Calculer la similarité avec TF-IDF
+        const tfidf = new natural.TfIdf();
+        const sourceTokens = text.toLowerCase().split(/\s+/);
+        const targetTokens = memoireText.toLowerCase().split(/\s+/);
+        
+        tfidf.addDocument(sourceTokens);
+        tfidf.addDocument(targetTokens);
+        
+        const similarity = calculateCosineSimilarity(tfidf, sourceTokens, targetTokens);
+        
+        if (similarity >= threshold) {
+          results.push({
+            id_memoire: memoire.id_memoire,
+            libelle: memoire.libelle,
+            similarity: parseFloat((similarity * 100).toFixed(2))
+          });
+        }
+      } catch (error) {
+        console.error(`Erreur lors du traitement du mémoire ${memoire.id_memoire}:`, error);
+        continue;
+      }
+    }
+
+    return results.sort((a, b) => b.similarity - a.similarity);
+  } catch (error) {
+    console.error('Erreur lors de la comparaison:', error);
+    throw error;
+  }
+}
+
+// Fonction helper pour calculer la similarité cosinus
+function calculateCosineSimilarity(tfidf, sourceTokens, targetTokens) {
+  const sourceVector = {};
+  const targetVector = {};
+  
+  // Create TF-IDF vectors (tokens are already lowercase from previous processing)
+  sourceTokens.forEach(token => {
+    sourceVector[token] = tfidf.tfidf(token, 0);
+  });
+  
+  targetTokens.forEach(token => {
+    targetVector[token] = tfidf.tfidf(token, 1);
+  });
+  
+  // Calculate cosine similarity
+  let dotProduct = 0;
+  let sourceNorm = 0;
+  let targetNorm = 0;
+  
+  Object.keys(sourceVector).forEach(token => {
+    if (targetVector[token]) {
+      dotProduct += sourceVector[token] * targetVector[token];
+    }
+    sourceNorm += sourceVector[token] * sourceVector[token];
+  });
+  
+  Object.keys(targetVector).forEach(token => {
+    targetNorm += targetVector[token] * targetVector[token];
+  });
+  
+  // Calculate final similarity
+  const denominator = Math.sqrt(sourceNorm) * Math.sqrt(targetNorm);
+  return denominator === 0 ? 0 : dotProduct / denominator;
+}
 
 /**
  * Get similarity status based on highest similarity percentage
@@ -109,41 +257,63 @@ async function compareWithExistingMemoires(text, threshold = 0.5) {
   try {
     // Get all validated mémoires
     const [memoires] = await db.promise().query(`
-      SELECT id_memoire, libelle, file_path 
-      FROM memoire 
-      WHERE status = 'validated' AND file_path IS NOT NULL
+      SELECT m.id_memoire, m.libelle, m.file_path,
+             cr.results_json as previous_comparison
+      FROM memoire m
+      LEFT JOIN comparison_results cr ON m.id_memoire = cr.memoire_id
+      WHERE m.status = 'validated'
     `);
 
     const results = [];
     
-    // Compare with each mémoire
     for (const memoire of memoires) {
       try {
-        if (!fs.existsSync(memoire.file_path)) {
-          console.warn(`File not found: ${memoire.file_path}`);
+        // Construct S3 key from file path
+        const s3Key = `memoires/${memoire.file_path.split('/').pop()}`; // Extract filename
+        const bucketName = 'archivamemo'; // Définir la variable au début de la fonction
+
+        console.log(`Attempting to download from S3 for ${memoire.id_memoire}:`, {
+          bucket: bucketName,
+          key: s3Key
+        });
+
+        // Télécharger le fichier depuis S3
+        const fileBuffer = await downloadFromS3(bucketName, s3Key);
+        
+        // Extraire le texte du PDF
+        const memoireText = await extractTextFromPDF(fileBuffer);
+        
+        if (!memoireText) {
+          console.warn(`Pas de texte extrait pour le mémoire ${memoire.id_memoire}`);
           continue;
         }
+
+        // Calculer la similarité avec TF-IDF
+        const tfidf = new natural.TfIdf();
+        const sourceTokens = text.toLowerCase().split(/\s+/);
+        const targetTokens = memoireText.toLowerCase().split(/\s+/);
         
-        const memoireText = await extractTextFromPDF(memoire.file_path);
-        const similarity = stringSimilarity.compareTwoStrings(text, memoireText);
+        tfidf.addDocument(sourceTokens);
+        tfidf.addDocument(targetTokens);
+        
+        const similarity = calculateCosineSimilarity(tfidf, sourceTokens, targetTokens);
         
         if (similarity >= threshold) {
           results.push({
             id_memoire: memoire.id_memoire,
             libelle: memoire.libelle,
-            similarity: parseFloat((similarity * 100).toFixed(2)) // Convert to percentage
+            similarity: parseFloat((similarity * 100).toFixed(2))
           });
         }
       } catch (error) {
-        console.error(`Error processing mémoire ${memoire.id_memoire}:`, error);
-        continue; // Skip this mémoire but continue with others
+        console.error(`Error processing memoire ${memoire.id_memoire}:`, error);
+        continue;
       }
     }
-    
-    // Sort by similarity (highest first)
+
     return results.sort((a, b) => b.similarity - a.similarity);
   } catch (error) {
-    console.error('Error comparing with existing mémoires:', error);
+    console.error('Error during comparison:', error);
     throw new Error('Failed to compare with existing mémoires');
   }
 }
@@ -259,43 +429,43 @@ async function getDetailedComparison(sourceText, targetText) {
 }
 
 // Ajouter cette fonction helper pour le calcul de similarité cosinus
-function calculateCosineSimilarity(text1, text2) {
-  const tfidf = new natural.TfIdf();
+// function calculateCosineSimilarity(text1, text2) {
+//   const tfidf = new natural.TfIdf();
   
-  const words1 = text1.toLowerCase().split(/\s+/);
-  const words2 = text2.toLowerCase().split(/\s+/);
+//   const words1 = text1.toLowerCase().split(/\s+/);
+//   const words2 = text2.toLowerCase().split(/\s+/);
   
-  tfidf.addDocument(words1);
-  tfidf.addDocument(words2);
+//   tfidf.addDocument(words1);
+//   tfidf.addDocument(words2);
   
-  const vector1 = {};
-  const vector2 = {};
+//   const vector1 = {};
+//   const vector2 = {};
   
-  tfidf.listTerms(0).forEach(item => {
-    vector1[item.term] = item.tfidf;
-  });
+//   tfidf.listTerms(0).forEach(item => {
+//     vector1[item.term] = item.tfidf;
+//   });
   
-  tfidf.listTerms(1).forEach(item => {
-    vector2[item.term] = item.tfidf;
-  });
+//   tfidf.listTerms(1).forEach(item => {
+//     vector2[item.term] = item.tfidf;
+//   });
   
-  let dotProduct = 0;
-  let norm1 = 0;
-  let norm2 = 0;
+//   let dotProduct = 0;
+//   let norm1 = 0;
+//   let norm2 = 0;
   
-  Object.keys(vector1).forEach(term => {
-    if (vector2[term]) {
-      dotProduct += vector1[term] * vector2[term];
-    }
-    norm1 += vector1[term] * vector1[term];
-  });
+//   Object.keys(vector1).forEach(term => {
+//     if (vector2[term]) {
+//       dotProduct += vector1[term] * vector2[term];
+//     }
+//     norm1 += vector1[term] * vector1[term];
+//   });
   
-  Object.keys(vector2).forEach(term => {
-    norm2 += vector2[term] * vector2[term];
-  });
+//   Object.keys(vector2).forEach(term => {
+//     norm2 += vector2[term] * vector2[term];
+//   });
   
-  return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2)) || 0;
-}
+//   return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2)) || 0;
+// }
 
 // Ajouter cette nouvelle fonction helper
 function findMatchingPhrases(sourceWords, targetWords) {
