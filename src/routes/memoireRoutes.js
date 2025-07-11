@@ -276,20 +276,29 @@ router.post('/check-similarity', uploadMiddleware.single('file'), async (req, re
         message: 'No file uploaded'
       });
     }
-// console.log('file');
-// console.log(req.file);
-    // Récupérer le fichier depuis S3
-    const command = new GetObjectCommand({
-      Bucket: process.env.AWS_BUCKET_NAME,
-      Key: req.file.key 
-    });
-    const response = await s3.send(command);
 
-// Convertir le Body (qui est un stream) en buffer
-const buffer = await streamToBuffer.streamToBuffer(response.Body);
+    // Récupérer le fichier depuis S3
+    let buffer;
     try {
-      // console.log("commadeeeeeeeeeeeeeeeeeeee");
-      // console.log(command);
+      const command = new GetObjectCommand({
+        Bucket: process.env.AWS_BUCKET_NAME,
+        Key: req.file.key
+      });
+      const response = await s3.send(command);
+
+      // Stream to buffer
+      buffer = await streamToBuffer.streamToBuffer(response.Body);
+    } catch (err) {
+      console.error('Erreur lors du téléchargement depuis S3 ou conversion buffer:', err);
+      return res.status(500).json({
+        success: false,
+        message: "Erreur lors du téléchargement ou conversion du fichier depuis S3",
+        error: err.message,
+        stack: err.stack
+      });
+    }
+
+    try {
       const text = await similarityChecker.extractTextFromPDF(buffer);
       const results = await similarityChecker.compareWithExistingMemoires(text);
       const status = await similarityChecker.getSimilarityStatus(results);
@@ -312,14 +321,17 @@ const buffer = await streamToBuffer.streamToBuffer(response.Body);
       console.error('Error processing file:', error);
       res.status(500).json({
         success: false,
-        message: 'Erreur lors du traitement du fichier pour la vérification de similarité'
+        message: 'Erreur lors du traitement du fichier pour la vérification de similarité',
+        error: error.message,
+        stack: error.stack
       });
     }
   } catch (error) {
     console.error('Error checking similarity:', error);
     res.status(500).json({
       success: false,
-      message: error.message || 'Error checking similarity'
+      message: error.message || 'Error checking similarity',
+      stack: error.stack
     });
   }
 });
@@ -508,9 +520,20 @@ router.get('/api/memoire/:sourceId/similarity/:targetId/details', async (req, re
     const sourceMemoire = memoires.find(m => m.id_memoire.toString() === sourceId);
     const targetMemoire = memoires.find(m => m.id_memoire.toString() === targetId);
 
-    // Extract text from both PDFs
-    const sourceText = await similarityChecker.extractTextFromPDF(sourceMemoire.file_path);
-    const targetText = await similarityChecker.extractTextFromPDF(targetMemoire.file_path);
+    // Extraire le texte depuis les PDF (S3 ou local)
+    let sourceBuffer, targetBuffer;
+    if (sourceMemoire.file_path.startsWith('memoires/') || sourceMemoire.file_path.startsWith('uploads/')) {
+      sourceBuffer = await similarityChecker.downloadFromS3(process.env.AWS_BUCKET_NAME, sourceMemoire.file_path);
+    } else {
+      sourceBuffer = require('fs').readFileSync(sourceMemoire.file_path);
+    }
+    if (targetMemoire.file_path.startsWith('memoires/') || targetMemoire.file_path.startsWith('uploads/')) {
+      targetBuffer = await similarityChecker.downloadFromS3(process.env.AWS_BUCKET_NAME, targetMemoire.file_path);
+    } else {
+      targetBuffer = require('fs').readFileSync(targetMemoire.file_path);
+    }
+    const sourceText = await similarityChecker.extractTextFromPDF(sourceBuffer);
+    const targetText = await similarityChecker.extractTextFromPDF(targetBuffer);
 
     // Get detailed comparison
     const comparison = await similarityChecker.getDetailedComparison(sourceText, targetText);
@@ -528,7 +551,8 @@ router.get('/api/memoire/:sourceId/similarity/:targetId/details', async (req, re
     console.error('Error getting detailed similarity:', error);
     res.status(500).json({
       success: false,
-      message: 'Erreur lors de la récupération des détails de similarité'
+      message: 'Erreur lors de la récupération des détails de similarité',
+      error: error.message
     });
   }
 });

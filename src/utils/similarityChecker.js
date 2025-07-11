@@ -165,7 +165,7 @@ async function getSimilarityStatus(results) {
   try {
     // Get thresholds from database with correct setting_key names
     const [thresholds] = await db.promise().query(
-      "SELECT  setting_value FROM app_settings WHERE setting_key IN ('similarity_warning_threshold', 'similarity_danger_threshold')"
+      "SELECT setting_key, setting_value FROM app_settings WHERE setting_key IN ('similarity_warning_threshold', 'similarity_danger_threshold')"
     );
 
     if (!thresholds || thresholds.length < 2) {
@@ -389,12 +389,13 @@ async function getDetailedComparison(sourceText, targetText) {
         tfidf.addDocument(targetPara);
         
         // Calculer la similarité avec string-similarity et TF-IDF
+        const sourceWords = sourcePara.split(/\s+/);
+        const targetWords = targetPara.split(/\s+/);
         const stringSim = stringSimilarity.compareTwoStrings(sourcePara, targetPara);
-        const similarity = Math.max(stringSim, calculateCosineSimilarity(sourcePara, targetPara));
+        const cosineSim = calculateCosineSimilarity(tfidf, sourceWords, targetWords);
+        const similarity = Math.max(stringSim, cosineSim);
 
         if (similarity >= similarityThreshold) {
-          const sourceWords = sourcePara.split(/\s+/);
-          const targetWords = targetPara.split(/\s+/);
           const matchingPhrases = findMatchingPhrases(sourceWords, targetWords);
 
           detailedMatches.push({
