@@ -143,11 +143,21 @@ router.get('/:id/download', async (req, res) => {
       });
     }
 
+    // Correction : utiliser file_path tel quel si c'est une clé S3, sinon extraire depuis l'URL complète
+    let key = memoire[0].file_path;
+    if (key.startsWith('http')) {
+      // Extraire la clé S3 depuis l'URL complète
+      const match = key.match(/amazonaws\.com\/(.*)$/);
+      if (match && match[1]) {
+        key = match[1];
+      }
+    }
+    // Nettoyage éventuel du double encodage
+    key = decodeURIComponent(key);
     const command = new GetObjectCommand({
       Bucket: process.env.AWS_BUCKET_NAME,
-      Key: memoire[0].file_path.replace(/^https:\/\/.*\.amazonaws\.com\//, '')
+      Key: key
     });
-
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
     
     res.json({ 
