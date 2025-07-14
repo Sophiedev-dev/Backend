@@ -23,6 +23,7 @@ const emailRoutes = require('./src/routes/emailRoutes');
 const dashboardRoutes = require('./src/routes/dashboardRoutes');
 const adminRoutes = require('./src/routes/adminRoutes');
 const statsRoutes = require('./src/routes/statsRoutes');
+const similarityRoutes = require('./src/routes/similarityRoute');
 
 // Import des middlewares
 const errorHandler = require('./src/middlewares/errorHandler');
@@ -57,6 +58,7 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/stats", statsRoutes);
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/api/similarity', similarityRoutes);
 
 // Configuration S3
 const s3 = new S3Client({
